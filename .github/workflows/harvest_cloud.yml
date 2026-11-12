@@ -1,0 +1,25 @@
+name: Economic Times 24x7 Cloud Harvester
+
+on:
+  schedule:
+    - cron: '*/30 * * * *'
+  workflow_dispatch:
+
+jobs:
+  harvest-economic-times:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    steps:
+      - name: Checkout Harvester Engine
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Run High-Speed Cloud Harvester
+        env:
+          VAULT_PAT: ${{ secrets.VAULT_PAT }}
+        run: |
+          python3 harvest_et_cloud.py
