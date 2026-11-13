@@ -35,13 +35,31 @@ def clean_html(raw_html):
 def get_token():
     return os.environ.get("VAULT_PAT", "").strip()
 
+def get_vault_repo_for_date(target_date):
+    """
+    Volume 1: 2001 to 2012
+    Volume 2: 2013 to 2019
+    Volume 3: 2020 to August 23, 2026 (~500 MB)
+    Volume 4: August 24, 2026 onwards
+    """
+    if target_date.year <= 2012:
+        return "economic-times-vault-1"
+    elif target_date.year <= 2019:
+        return "economic-times-vault-2"
+    elif target_date < datetime.date(2026, 8, 24):
+        return "economic-times-vault-3"
+    else:
+        return "economic-times-vault-4"
+
 def get_vault_repo_for_year(year):
     if year <= 2012:
         return "economic-times-vault-1"
     elif year <= 2019:
         return "economic-times-vault-2"
-    else:
+    elif year <= 2025:
         return "economic-times-vault-3"
+    else:
+        return "economic-times-vault-4"
 
 def fetch_day_archive_links(target_date):
     st = (target_date - BASE_DATE).days
@@ -140,12 +158,24 @@ def push_batch_to_vault(repo_name, articles_batch, checkpoint_updates):
     token = get_token()
     repo_url = f"https://x-access-token:{token}@github.com/parshant65-lang/{repo_name}.git"
 
-    if os.path.exists(VAULT_LOCAL_DIR):
-        shutil.rmtree(VAULT_LOCAL_DIR, ignore_errors=True)
+    current_remote = None
+    if os.path.exists(VAULT_LOCAL_DIR) and os.path.exists(os.path.join(VAULT_LOCAL_DIR, ".git")):
+        try:
+            res = subprocess.run(["git", "config", "--get", "remote.origin.url"], cwd=VAULT_LOCAL_DIR, capture_output=True, text=True)
+            if repo_name in res.stdout:
+                current_remote = repo_name
+        except:
+            pass
 
     try:
-        log(f"[SYNC] Cloning {repo_name} for batch push...")
-        subprocess.run(["git", "clone", "--depth", "1", repo_url, VAULT_LOCAL_DIR], check=True, capture_output=True)
+        if current_remote == repo_name:
+            log(f"[SYNC] Pulling latest {repo_name}...")
+            subprocess.run(["git", "pull", "--rebase", "origin", "main"], cwd=VAULT_LOCAL_DIR, check=True, capture_output=True)
+        else:
+            if os.path.exists(VAULT_LOCAL_DIR):
+                shutil.rmtree(VAULT_LOCAL_DIR, ignore_errors=True)
+            log(f"[SYNC] Cloning {repo_name} for batch push...")
+            subprocess.run(["git", "clone", "--depth", "1", repo_url, VAULT_LOCAL_DIR], check=True, capture_output=True)
 
         by_year_month = {}
         for a in articles_batch:
@@ -213,9 +243,6 @@ def push_batch_to_vault(repo_name, articles_batch, checkpoint_updates):
 
     except Exception as e:
         log(f"[SYNC EXCEPTION] {e}")
-    finally:
-        if os.path.exists(VAULT_LOCAL_DIR):
-            shutil.rmtree(VAULT_LOCAL_DIR, ignore_errors=True)
 
 def main():
     log("=" * 65)
@@ -230,26 +257,26 @@ def main():
     cp = {}
     active_vault = "economic-times-vault-1"
 
-    for v_name in ["economic-times-vault-3", "economic-times-vault-2", "economic-times-vault-1"]:
-        if os.path.exists(VAULT_LOCAL_DIR):
-            shutil.rmtree(VAULT_LOCAL_DIR, ignore_errors=True)
-        v_url = f"https://x-access-token:{token}@github.com/parshant65-lang/{v_name}.git"
-        res = subprocess.run(["git", "clone", "--depth", "1", v_url, VAULT_LOCAL_DIR], capture_output=True)
-        if res.returncode == 0:
-            cp_path = os.path.join(VAULT_LOCAL_DIR, "checkpoint.json")
-            if os.path.exists(cp_path):
-                try:
-                    with open(cp_path, "r", encoding="utf-8") as f:
-                        c_temp = json.load(f)
-                        if c_temp.get("current_date"):
-                            cp = c_temp
-                            active_vault = v_name
-                            log(f"Found active checkpoint in {v_name}: Date {cp.get('current_date')}")
-                            break
-                except:
-                    pass
-        if os.path.exists(VAULT_LOCAL_DIR):
-            shutil.rmtree(VAULT_LOCAL_DIR, ignore_errors=True)
+    import base64
+    for v_name in ["economic-times-vault-4", "economic-times-vault-3", "economic-times-vault-2", "economic-times-vault-1"]:
+        try:
+            req = urllib.request.Request(
+                f"https://api.github.com/repos/parshant65-lang/{v_name}/contents/checkpoint.json",
+                headers={"Authorization": f"token {token}", "Accept": "application/vnd.github.v3+json"}
+            )
+            with urllib.request.urlopen(req, timeout=8) as resp:
+                data = json.loads(resp.read().decode())
+                c_temp = json.loads(base64.b64decode(data["content"]))
+                if c_temp.get("rollover_status") == "ARCHIVED_FULL":
+                    log(f"[ARCHIVED] Vault {v_name} is marked ARCHIVED_FULL. Skipping...")
+                    continue
+                if c_temp.get("current_date"):
+                    cp = c_temp
+                    active_vault = v_name
+                    log(f"Found active checkpoint in {v_name}: Date {cp.get('current_date')}")
+                    break
+        except Exception:
+            pass
 
     start_date_str = cp.get("current_date", "2001-01-01")
     cur_y, cur_m, cur_d = [int(x) for x in start_date_str.split("-")]
@@ -267,7 +294,7 @@ def main():
             log("Session time limit reached (~4h). Flushing and preparing next run...")
             break
 
-        target_vault = get_vault_repo_for_year(current_date.year)
+        target_vault = get_vault_repo_for_date(current_date)
         
         day_links = fetch_day_archive_links(current_date)
         log(f"[{current_date}] Found {len(day_links)} articles in daily archive")
